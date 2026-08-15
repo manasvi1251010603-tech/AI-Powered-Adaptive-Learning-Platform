@@ -17,6 +17,14 @@ from app.db.models.video import (
     VideoSegment,
     VideoSegmentConcept,
 )
+
+
+
+from app.db.models.personalization import (
+    LearningPath,
+    LearningPathStep,
+    Recommendation,
+)
 from app.db.models.personalization import Recommendation
 from app.db.models.knowledge import LearnerConceptMastery
 from app.api.auth.dependencies import get_current_user

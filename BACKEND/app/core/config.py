@@ -13,46 +13,137 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
-    youtube_api_key: str | None = None
-    openai_api_key: str | None = None
-    openai_model_general: str = "gpt-5.6"
+
+    # --------------------------------------------------------
+    # Application
+    # --------------------------------------------------------
 
     app_name: str = "AI-Powered Adaptive Learning Platform API"
-    environment: str = Field(default="development", alias="ENVIRONMENT")
-    debug: bool = Field(default=False, alias="DEBUG")
+    environment: str = Field(
+        default="development",
+        alias="ENVIRONMENT",
+    )
+    debug: bool = Field(
+        default=False,
+        alias="DEBUG",
+    )
     api_v1_prefix: str = "/api/v1"
 
-    database_url: str | None = Field(default=None, alias="DATABASE_URL")
-    redis_url: str | None = Field(default=None, alias="REDIS_URL")
-    jwt_secret_key: str | None = Field(default=None, alias="JWT_SECRET_KEY")
-    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    # --------------------------------------------------------
+    # Database / Cache
+    # --------------------------------------------------------
 
-    storage_endpoint: str | None = Field(default=None, alias="STORAGE_ENDPOINT")
-    storage_bucket: str | None = Field(default=None, alias="STORAGE_BUCKET")
-    storage_access_key: str | None = Field(default=None, alias="STORAGE_ACCESS_KEY")
-    storage_secret_key: str | None = Field(default=None, alias="STORAGE_SECRET_KEY")
-    storage_region: str | None = Field(default=None, alias="STORAGE_REGION")
+    database_url: str | None = Field(
+        default=None,
+        alias="DATABASE_URL",
+    )
+    redis_url: str | None = Field(
+        default=None,
+        alias="REDIS_URL",
+    )
+
+    # --------------------------------------------------------
+    # Authentication
+    # --------------------------------------------------------
+
+    jwt_secret_key: str | None = Field(
+        default=None,
+        alias="JWT_SECRET_KEY",
+    )
+
+    # --------------------------------------------------------
+    # AI / External APIs
+    # --------------------------------------------------------
+
+    youtube_api_key: str | None = Field(
+        default=None,
+        alias="YOUTUBE_API_KEY",
+    )
+
+    openai_api_key: str | None = Field(
+        default=None,
+        alias="OPENAI_API_KEY",
+    )
+
+    openai_model_general: str = Field(
+        default="gpt-5.6",
+        alias="OPENAI_MODEL_GENERAL",
+    )
+
+    # --------------------------------------------------------
+    # Storage
+    # --------------------------------------------------------
+
+    storage_endpoint: str | None = Field(
+        default=None,
+        alias="STORAGE_ENDPOINT",
+    )
+    storage_bucket: str | None = Field(
+        default=None,
+        alias="STORAGE_BUCKET",
+    )
+    storage_access_key: str | None = Field(
+        default=None,
+        alias="STORAGE_ACCESS_KEY",
+    )
+    storage_secret_key: str | None = Field(
+        default=None,
+        alias="STORAGE_SECRET_KEY",
+    )
+    storage_region: str | None = Field(
+        default=None,
+        alias="STORAGE_REGION",
+    )
+
+    # --------------------------------------------------------
+    # Frontend
+    # --------------------------------------------------------
 
     frontend_origin: AnyUrl | str = Field(
         default="http://localhost:3000",
         alias="FRONTEND_ORIGIN",
     )
 
-    @field_validator("database_url", "redis_url", mode="before")
+    # --------------------------------------------------------
+    # Validators
+    # --------------------------------------------------------
+
+    @field_validator(
+        "database_url",
+        "redis_url",
+        mode="before",
+    )
     @classmethod
-    def empty_string_to_none(cls, value: str | None) -> str | None:
+    def empty_string_to_none(
+        cls,
+        value: str | None,
+    ) -> str | None:
         if isinstance(value, str) and not value.strip():
             return None
         return value
 
-    @field_validator("frontend_origin", mode="before")
+    @field_validator(
+        "frontend_origin",
+        mode="before",
+    )
     @classmethod
-    def normalize_frontend_origin(cls, value: str) -> str:
+    def normalize_frontend_origin(
+        cls,
+        value: str,
+    ) -> str:
         return value.rstrip("/")
+
+    # --------------------------------------------------------
+    # Properties
+    # --------------------------------------------------------
 
     @property
     def is_development(self) -> bool:
-        return self.environment.lower() in {"development", "dev", "local"}
+        return self.environment.lower() in {
+            "development",
+            "dev",
+            "local",
+        }
 
 
 @lru_cache
