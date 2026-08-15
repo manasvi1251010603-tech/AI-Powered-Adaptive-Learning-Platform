@@ -8,6 +8,17 @@ from app.db.models.personalization import (
     LearningPath,
     LearningPathStep,
 )
+from app.db.models.content import (
+    Resource,
+    ResourceConcept,
+)
+from app.db.models.video import (
+    Video,
+    VideoSegment,
+    VideoSegmentConcept,
+)
+from app.db.models.personalization import Recommendation
+from app.db.models.knowledge import LearnerConceptMastery
 from app.api.auth.dependencies import get_current_user
 from app.api.learning.schemas import (
     DiagnosticAnalysisResponse,
@@ -24,8 +35,9 @@ from app.api.learning.schemas import (
     LearningGoalResponse,
     LearningPathResponse,
     LearningPathStepResponse,
+    ResourceRecommendationResponse,
+    ResourceSectionResponse,
     SubjectResponse,
-
 )
 from app.db.models.assessment import (
     Assessment,
@@ -1417,6 +1429,315 @@ def recommend_resources(
     current_user: User = Depends(get_current_user),
 ):
     # --------------------------------------------------------
+    # 1. Find concept
+    # --------------------------------------------------------
+
+    concept = db.scalar(
+        select(Concept).where(
+            Concept.id == concept_id,
+            Concept.is_active.is_(True),
+        )
+    )
+
+    if concept is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Concept not found.",
+        )
+
+    # --------------------------------------------------------
+    # 2. Find learner mastery
+    # --------------------------------------------------------
+
+    mastery = db.scalar(
+        select(LearnerConceptMastery).where(
+            LearnerConceptMastery.user_id
+            == current_user.id,
+            LearnerConceptMastery.concept_id
+            == concept.id,
+        )
+    )
+
+    mastery_score = (
+        float(mastery.mastery_score)
+        if mastery is not None
+        else 0.0
+    )
+
+    # --------------------------------------------------------
+    # 3. Search YouTube
+    # --------------------------------------------------------
+
+    from app.services.youtube_service import (
+        YouTubeService,
+    )
+
+    from app.services.resource_intelligence import (
+        ResourceIntelligenceService,
+    )
+
+    youtube = YouTubeService()
+    intelligence = ResourceIntelligenceService()
+
+    query = f"{concept.name} tutorial explained"
+
+    videos = youtube.search_videos(
+        query,
+        max_results=5,
+    )
+
+    recommendations = []
+
+    # --------------------------------------------------------
+    # 4. Process candidate videos
+    # --------------------------------------------------------
+
+    for video_data in videos:
+
+        try:
+            transcript = intelligence.get_transcript(
+                video_data["video_id"]
+            )
+
+        except Exception:
+            # No usable transcript.
+            # Never invent timestamps.
+            continue
+
+        if not transcript:
+            continue
+
+        transcript = (
+            intelligence.combine_transcript_chunks(
+                transcript
+            )
+        )
+
+        sections = (
+            intelligence.map_concept_to_transcript(
+                concept_name=concept.name,
+                concept_description=(
+                    concept.description or ""
+                ),
+                transcript=transcript,
+                mastery_score=mastery_score,
+            )
+        )
+
+        if not sections:
+            continue
+
+        # ----------------------------------------------------
+        # 5. Save Resource
+        # ----------------------------------------------------
+
+        resource = db.scalar(
+            select(Resource).where(
+                Resource.url
+                == video_data["url"],
+                Resource.subject_id
+                == concept.subject_id,
+            )
+        )
+
+        if resource is None:
+
+            resource = Resource(
+                subject_id=concept.subject_id,
+                resource_type="video",
+                title=video_data["title"][:250],
+                description=(
+                    video_data["description"]
+                    or None
+                ),
+                url=video_data["url"],
+                storage_key=video_data["video_id"],
+                thumbnail_url=(
+                    video_data["thumbnail_url"]
+                ),
+                language="en",
+                status="published",
+                created_by_id=current_user.id,
+            )
+
+            db.add(resource)
+            db.flush()
+
+        # ----------------------------------------------------
+        # 6. Link Resource → Concept
+        # ----------------------------------------------------
+
+        resource_concept = db.scalar(
+            select(ResourceConcept).where(
+                ResourceConcept.resource_id
+                == resource.id,
+                ResourceConcept.concept_id
+                == concept.id,
+            )
+        )
+
+        if resource_concept is None:
+
+            average_confidence = (
+                sum(
+                    section.confidence
+                    for section in sections
+                )
+                / len(sections)
+                * 100
+            )
+
+            db.add(
+                ResourceConcept(
+                    resource_id=resource.id,
+                    concept_id=concept.id,
+                    relevance_score=min(
+                        100,
+                        average_confidence,
+                    ),
+                )
+            )
+
+        # ----------------------------------------------------
+        # 7. Create / update Video
+        # ----------------------------------------------------
+
+        video = db.scalar(
+            select(Video).where(
+                Video.resource_id
+                == resource.id
+            )
+        )
+
+        if video is None:
+
+            video = Video(
+                resource_id=resource.id,
+                storage_key=video_data[
+                    "video_id"
+                ],
+                transcript_status="completed",
+                segmentation_status="completed",
+            )
+
+            db.add(video)
+            db.flush()
+
+        # ----------------------------------------------------
+        # 8. Store AI-selected timestamp sections
+        # ----------------------------------------------------
+
+        stored_sections = []
+
+        for index, section in enumerate(
+            sections,
+            start=1,
+        ):
+
+            segment_title = (
+                f"{concept.name} - Section {index}"
+            )
+
+            video_segment = VideoSegment(
+                video_id=video.id,
+                title=segment_title[:250],
+                start_seconds=section.start_seconds,
+                end_seconds=section.end_seconds,
+                transcript_text=None,
+                ai_confidence=(
+                    section.confidence * 100
+                ),
+                source="ai",
+                review_status="pending",
+            )
+
+            db.add(video_segment)
+            db.flush()
+
+            db.add(
+                VideoSegmentConcept(
+                    segment_id=video_segment.id,
+                    concept_id=concept.id,
+                    confidence=(
+                        section.confidence * 100
+                    ),
+                    is_primary=True,
+                )
+            )
+
+            stored_sections.append(
+                video_segment
+            )
+
+        # ----------------------------------------------------
+        # 9. Create recommendation
+        # ----------------------------------------------------
+
+        best_confidence = max(
+            section.confidence
+            for section in sections
+        )
+
+        recommendation = Recommendation(
+            user_id=current_user.id,
+            concept_id=concept.id,
+            resource_id=resource.id,
+            recommendation_type="video",
+            score=best_confidence * 100,
+            reason=(
+                f"Recommended because this video contains "
+                f"AI-identified sections relevant to "
+                f"{concept.name}, which currently has "
+                f"{mastery_score:.1f}% mastery."
+            ),
+            generated_by="ai",
+        )
+
+        db.add(recommendation)
+
+        recommendations.append(
+            ResourceRecommendationResponse(
+                video_id=video_data["video_id"],
+                title=video_data["title"],
+                description=(
+                    video_data["description"]
+                ),
+                channel_title=(
+                    video_data["channel_title"]
+                ),
+                url=video_data["url"],
+                thumbnail_url=(
+                    video_data["thumbnail_url"]
+                ),
+                sections=[
+                    ResourceSectionResponse(
+                        start_seconds=(
+                            section.start_seconds
+                        ),
+                        end_seconds=(
+                            section.end_seconds
+                        ),
+                        concept=section.concept,
+                        reason=section.reason,
+                        confidence=section.confidence,
+                    )
+                    for section in sections
+                ],
+            )
+        )
+
+        if len(recommendations) >= 3:
+            break
+
+    db.commit()
+
+    return recommendations
+def recommend_resources(
+    concept_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # --------------------------------------------------------
     # 1. Load concept
     # --------------------------------------------------------
 
@@ -1470,10 +1791,7 @@ def recommend_resources(
         ResourceIntelligenceService()
     )
 
-    query = (
-        f"{concept.name} "
-        f"Python tutorial explained"
-    )
+    query = f"{concept.name} tutorial explained"
 
     videos = youtube.search_videos(
         query,
