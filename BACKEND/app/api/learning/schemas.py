@@ -142,3 +142,63 @@ class DiagnosticStartResponse(BaseModel):
     status: str
     total_items: int
     questions: list[DiagnosticQuestionResponse]
+
+# ============================================================
+# DIAGNOSTIC ANSWERS
+# ============================================================
+
+class DiagnosticAnswerRequest(BaseModel):
+    attempt_id: UUID
+    assessment_item_id: UUID
+    answer_data: dict
+    confidence_rating: int | None = Field(
+        default=None,
+        ge=1,
+        le=5,
+    )
+
+
+class MasteryUpdateResponse(BaseModel):
+    previous_score: float
+    new_score: float
+    state: str
+
+
+class DiagnosticAnswerResponse(BaseModel):
+    is_correct: bool
+    score: float
+    concept_id: UUID
+    concept_name: str
+    mastery_update: MasteryUpdateResponse
+
+
+class DiagnosticCompleteResponse(BaseModel):
+    attempt_id: UUID
+    assessment_id: UUID
+    status: str
+    answered_items: int
+    total_items: int
+    analysis_available: bool
+
+
+class ConceptAnalysisResponse(BaseModel):
+    concept_id: UUID
+    name: str
+    mastery_score: float
+    mastery_state: str
+    confidence_score: float
+    attempts: int
+    correct_attempts: int
+
+
+class DiagnosticAnalysisSummary(BaseModel):
+    mastered: int
+    partial: int
+    weak: int
+    unknown: int
+
+
+class DiagnosticAnalysisResponse(BaseModel):
+    assessment_id: UUID
+    summary: DiagnosticAnalysisSummary
+    concepts: list[ConceptAnalysisResponse]

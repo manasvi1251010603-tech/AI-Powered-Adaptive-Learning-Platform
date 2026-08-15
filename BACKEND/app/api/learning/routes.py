@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -6,6 +7,10 @@ from sqlalchemy.orm import Session
 
 from app.api.auth.dependencies import get_current_user
 from app.api.learning.schemas import (
+    DiagnosticAnalysisResponse,
+    DiagnosticAnswerRequest,
+    DiagnosticAnswerResponse,
+    DiagnosticCompleteResponse,
     DiagnosticOptionResponse,
     DiagnosticQuestionResponse,
     DiagnosticStartResponse,
@@ -20,9 +25,14 @@ from app.db.models.assessment import (
     Assessment,
     AssessmentAttempt,
     AssessmentItem,
+    AssessmentResponse,
     Question,
 )
 from app.db.models.identity import LearnerProfile, User
+from app.db.models.knowledge import (
+    LearnerConceptMastery,
+    MasteryHistory,
+)
 from app.db.models.taxonomy import (
     Concept,
     LearnerSubject,
@@ -276,8 +286,7 @@ def start_diagnostic(
         db.scalars(
             select(Concept)
             .where(
-                Concept.subject_id
-                == learner_subject.subject_id,
+                Concept.subject_id == learner_subject.subject_id,
                 Concept.is_active.is_(True),
             )
             .order_by(Concept.name)
@@ -322,9 +331,7 @@ def start_diagnostic(
     if not questions:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
-                "No diagnostic questions are available."
-            ),
+            detail="No diagnostic questions are available.",
         )
 
     now = datetime.now(timezone.utc)
@@ -337,7 +344,7 @@ def start_diagnostic(
         learner_subject_id=learner_subject.id,
         assessment_type="diagnostic",
         status="in_progress",
-        target_concepts=concept_ids,
+        target_concepts=[str(concept_id) for concept_id in concept_ids],
         started_at=now,
     )
 
@@ -387,7 +394,7 @@ def start_diagnostic(
     # 7. Build safe response
     #
     # IMPORTANT:
-    # We deliberately DO NOT expose is_correct.
+    # We deliberately DO NOT expose the answer key.
     # --------------------------------------------------------
 
     question_responses = []
@@ -426,4 +433,446 @@ def start_diagnostic(
         status=assessment.status,
         total_items=len(questions),
         questions=question_responses,
+    )
+
+
+# ============================================================
+# DIAGNOSTIC ANSWER SUBMISSION
+# ============================================================
+
+@router.post(
+    "/diagnostic/{assessment_id}/answer",
+    response_model=DiagnosticAnswerResponse,
+)
+def submit_diagnostic_answer(
+    assessment_id: UUID,
+    payload: DiagnosticAnswerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> DiagnosticAnswerResponse:
+
+    # --------------------------------------------------------
+    # 1. Verify assessment belongs to the current learner
+    # --------------------------------------------------------
+
+    assessment = db.scalar(
+        select(Assessment)
+        .join(
+            LearnerSubject,
+            LearnerSubject.id == Assessment.learner_subject_id,
+        )
+        .where(
+            Assessment.id == assessment_id,
+            LearnerSubject.user_id == current_user.id,
+        )
+    )
+
+    if assessment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Assessment not found.",
+        )
+
+    if assessment.status != "in_progress":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This assessment is no longer in progress.",
+        )
+
+    # --------------------------------------------------------
+    # 2. Verify attempt belongs to this assessment + learner
+    # --------------------------------------------------------
+
+    attempt = db.scalar(
+        select(AssessmentAttempt).where(
+            AssessmentAttempt.id == payload.attempt_id,
+            AssessmentAttempt.assessment_id == assessment.id,
+            AssessmentAttempt.user_id == current_user.id,
+        )
+    )
+
+    if attempt is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Assessment attempt not found.",
+        )
+
+    if attempt.status != "in_progress":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This assessment attempt is no longer active.",
+        )
+
+    # --------------------------------------------------------
+    # 3. Find the assessment item
+    # --------------------------------------------------------
+
+    item = db.scalar(
+        select(AssessmentItem).where(
+            AssessmentItem.id == payload.assessment_item_id,
+            AssessmentItem.assessment_id == assessment.id,
+        )
+    )
+
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Assessment question not found.",
+        )
+
+    # --------------------------------------------------------
+    # 4. Prevent duplicate submissions
+    # --------------------------------------------------------
+
+    existing_response = db.scalar(
+        select(AssessmentResponse).where(
+            AssessmentResponse.attempt_id == attempt.id,
+            AssessmentResponse.assessment_item_id == item.id,
+        )
+    )
+
+    if existing_response is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This question has already been answered.",
+        )
+
+    # --------------------------------------------------------
+    # 5. Load question + answer key
+    # --------------------------------------------------------
+
+    question = db.scalar(
+        select(Question).where(
+            Question.id == item.question_id,
+        )
+    )
+
+    if question is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Question not found.",
+        )
+
+    # --------------------------------------------------------
+    # 6. Evaluate answer
+    #
+    # MVP currently supports MCQ selected_option.
+    # --------------------------------------------------------
+
+    selected_option = payload.answer_data.get(
+        "selected_option"
+    )
+
+    if not isinstance(selected_option, str):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "answer_data.selected_option "
+                "is required."
+            ),
+        )
+
+    correct_option = question.answer_data.get(
+        "correct_option"
+    )
+
+    if correct_option is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Question answer configuration is invalid.",
+        )
+
+    is_correct = (
+        selected_option.strip().upper()
+        == str(correct_option).strip().upper()
+    )
+
+    score = 100.0 if is_correct else 0.0
+
+    now = datetime.now(timezone.utc)
+
+    # --------------------------------------------------------
+    # 7. Save response
+    # --------------------------------------------------------
+
+    response = AssessmentResponse(
+        attempt_id=attempt.id,
+        assessment_item_id=item.id,
+        answer_data=payload.answer_data,
+        is_correct=is_correct,
+        score=score,
+        confidence_rating=payload.confidence_rating,
+        answered_at=now,
+    )
+
+    db.add(response)
+
+    # --------------------------------------------------------
+    # 8. Update attempt counters
+    # --------------------------------------------------------
+
+    attempt.answered_items += 1
+
+    # --------------------------------------------------------
+    # 9. Find/create learner mastery record
+    # --------------------------------------------------------
+
+    mastery = db.scalar(
+        select(LearnerConceptMastery).where(
+            LearnerConceptMastery.user_id == current_user.id,
+            LearnerConceptMastery.concept_id == item.concept_id,
+        )
+    )
+
+    if mastery is None:
+        mastery = LearnerConceptMastery(
+            user_id=current_user.id,
+            subject_id=assessment.learner_subject.subject_id,
+            concept_id=item.concept_id,
+            mastery_score=0,
+            confidence_score=0,
+            mastery_state="unknown",
+            attempts=0,
+            correct_attempts=0,
+        )
+
+        db.add(mastery)
+        db.flush()
+
+    previous_score = float(mastery.mastery_score)
+    previous_state = mastery.mastery_state
+
+    mastery.attempts += 1
+
+    if is_correct:
+        mastery.correct_attempts += 1
+
+    # --------------------------------------------------------
+    # 10. Calculate mastery
+    #
+    # MVP:
+    # accuracy = correct answers / total attempts
+    # --------------------------------------------------------
+
+    mastery.mastery_score = round(
+        (
+            mastery.correct_attempts
+            / mastery.attempts
+        ) * 100,
+        2,
+    )
+
+    if mastery.mastery_score >= 80:
+        mastery.mastery_state = "mastered"
+    elif mastery.mastery_score >= 40:
+        mastery.mastery_state = "partial"
+    else:
+        mastery.mastery_state = "weak"
+
+    if payload.confidence_rating is not None:
+        mastery.confidence_score = (
+            payload.confidence_rating * 20
+        )
+
+    mastery.last_assessed_at = now
+
+    # --------------------------------------------------------
+    # 11. Save mastery history
+    # --------------------------------------------------------
+
+    history = MasteryHistory(
+        learner_concept_mastery_id=mastery.id,
+        previous_score=previous_score,
+        new_score=float(mastery.mastery_score),
+        previous_state=previous_state,
+        new_state=mastery.mastery_state,
+        reason="assessment",
+    )
+
+    db.add(history)
+
+    db.commit()
+
+    return DiagnosticAnswerResponse(
+        is_correct=is_correct,
+        score=score,
+        concept_id=item.concept_id,
+        concept_name=item.concept.name,
+        mastery_update={
+            "previous_score": previous_score,
+            "new_score": float(mastery.mastery_score),
+            "state": mastery.mastery_state,
+        },
+    )
+
+
+# ============================================================
+# COMPLETE DIAGNOSTIC
+# ============================================================
+
+@router.post(
+    "/diagnostic/{assessment_id}/complete",
+    response_model=DiagnosticCompleteResponse,
+)
+def complete_diagnostic(
+    assessment_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> DiagnosticCompleteResponse:
+
+    assessment = db.scalar(
+        select(Assessment)
+        .join(
+            LearnerSubject,
+            LearnerSubject.id == Assessment.learner_subject_id,
+        )
+        .where(
+            Assessment.id == assessment_id,
+            LearnerSubject.user_id == current_user.id,
+        )
+    )
+
+    if assessment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Assessment not found.",
+        )
+
+    attempt = db.scalar(
+        select(AssessmentAttempt).where(
+            AssessmentAttempt.assessment_id == assessment.id,
+            AssessmentAttempt.user_id == current_user.id,
+            AssessmentAttempt.status == "in_progress",
+        )
+    )
+
+    if attempt is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Active assessment attempt not found.",
+        )
+
+    if attempt.answered_items < attempt.total_items:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Assessment is incomplete. "
+                f"{attempt.answered_items}/"
+                f"{attempt.total_items} questions answered."
+            ),
+        )
+
+    now = datetime.now(timezone.utc)
+
+    attempt.status = "completed"
+    attempt.completed_at = now
+
+    assessment.status = "completed"
+    assessment.completed_at = now
+
+    db.commit()
+
+    return DiagnosticCompleteResponse(
+        attempt_id=attempt.id,
+        assessment_id=assessment.id,
+        status="completed",
+        answered_items=attempt.answered_items,
+        total_items=attempt.total_items,
+        analysis_available=True,
+    )
+
+
+# ============================================================
+# DIAGNOSTIC ANALYSIS
+# ============================================================
+
+@router.get(
+    "/diagnostic/{assessment_id}/analysis",
+    response_model=DiagnosticAnalysisResponse,
+)
+def get_diagnostic_analysis(
+    assessment_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> DiagnosticAnalysisResponse:
+
+    assessment = db.scalar(
+        select(Assessment)
+        .join(
+            LearnerSubject,
+            LearnerSubject.id == Assessment.learner_subject_id,
+        )
+        .where(
+            Assessment.id == assessment_id,
+            LearnerSubject.user_id == current_user.id,
+        )
+    )
+
+    if assessment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Assessment not found.",
+        )
+
+    mastery_records = list(
+        db.scalars(
+            select(LearnerConceptMastery)
+            .join(
+                Concept,
+                Concept.id == LearnerConceptMastery.concept_id,
+            )
+            .where(
+                LearnerConceptMastery.user_id == current_user.id,
+                LearnerConceptMastery.subject_id
+                == assessment.learner_subject.subject_id,
+            )
+            .order_by(Concept.name)
+        ).all()
+    )
+
+    mastered = 0
+    partial = 0
+    weak = 0
+    unknown = 0
+
+    concepts = []
+
+    for mastery in mastery_records:
+
+        state = mastery.mastery_state
+
+        if state == "mastered":
+            mastered += 1
+        elif state == "partial":
+            partial += 1
+        elif state == "weak":
+            weak += 1
+        else:
+            unknown += 1
+
+        concepts.append(
+            {
+                "concept_id": mastery.concept_id,
+                "name": mastery.concept.name,
+                "mastery_score": float(
+                    mastery.mastery_score
+                ),
+                "mastery_state": state,
+                "confidence_score": float(
+                    mastery.confidence_score
+                ),
+                "attempts": mastery.attempts,
+                "correct_attempts": mastery.correct_attempts,
+            }
+        )
+
+    return DiagnosticAnalysisResponse(
+        assessment_id=assessment.id,
+        summary={
+            "mastered": mastered,
+            "partial": partial,
+            "weak": weak,
+            "unknown": unknown,
+        },
+        concepts=concepts,
     )
