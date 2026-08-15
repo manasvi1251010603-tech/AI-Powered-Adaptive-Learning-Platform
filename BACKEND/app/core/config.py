@@ -13,6 +13,9 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+    youtube_api_key: str | None = None
+    openai_api_key: str | None = None
+    openai_model_general: str = "gpt-5.6"
 
     app_name: str = "AI-Powered Adaptive Learning Platform API"
     environment: str = Field(default="development", alias="ENVIRONMENT")

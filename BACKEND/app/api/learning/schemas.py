@@ -202,3 +202,49 @@ class DiagnosticAnalysisResponse(BaseModel):
     assessment_id: UUID
     summary: DiagnosticAnalysisSummary
     concepts: list[ConceptAnalysisResponse]
+
+# ============================================================
+# PERSONALIZED LEARNING PATH
+# ============================================================
+
+class LearningPathStepResponse(BaseModel):
+    id: UUID
+    concept_id: UUID
+    concept_name: str
+    sequence_number: int
+    status: str
+    mastery_threshold: float
+    estimated_minutes: int | None
+    prerequisite_status: str
+    current_mastery: float
+    mastery_state: str
+
+    model_config = {"from_attributes": True}
+
+
+class LearningPathResponse(BaseModel):
+    id: UUID
+    learner_subject_id: UUID
+    status: str
+    estimated_minutes: int | None
+    progress_percent: float
+    generated_at: datetime
+    steps: list[LearningPathStepResponse]
+
+    model_config = {"from_attributes": True}
+class ResourceSectionResponse(BaseModel):
+    start_seconds: float
+    end_seconds: float
+    concept: str
+    reason: str
+    confidence: float
+
+
+class ResourceRecommendationResponse(BaseModel):
+    video_id: str
+    title: str
+    description: str
+    channel_title: str
+    url: str
+    thumbnail_url: str | None
+    sections: list[ResourceSectionResponse]

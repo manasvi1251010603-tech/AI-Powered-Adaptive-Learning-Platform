@@ -4,7 +4,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
+from app.db.models.personalization import (
+    LearningPath,
+    LearningPathStep,
+)
 from app.api.auth.dependencies import get_current_user
 from app.api.learning.schemas import (
     DiagnosticAnalysisResponse,
@@ -19,7 +22,10 @@ from app.api.learning.schemas import (
     LearnerProfileUpdate,
     LearnerSubjectResponse,
     LearningGoalResponse,
+    LearningPathResponse,
+    LearningPathStepResponse,
     SubjectResponse,
+
 )
 from app.db.models.assessment import (
     Assessment,
@@ -35,9 +41,11 @@ from app.db.models.knowledge import (
 )
 from app.db.models.taxonomy import (
     Concept,
+    ConceptPrerequisite,
     LearnerSubject,
     LearningGoal,
     Subject,
+
 )
 from app.db.session import get_db
 
@@ -876,3 +884,680 @@ def get_diagnostic_analysis(
         },
         concepts=concepts,
     )
+# ============================================================
+# PERSONALIZED LEARNING PATH
+# ============================================================
+
+@router.post(
+    "/path/generate",
+    response_model=LearningPathResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def generate_learning_path(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> LearningPathResponse:
+
+    # --------------------------------------------------------
+    # 1. Find the learner's active subject
+    # --------------------------------------------------------
+
+    learner_subject = db.scalar(
+        select(LearnerSubject).where(
+            LearnerSubject.user_id == current_user.id,
+            LearnerSubject.status == "active",
+        )
+        .order_by(LearnerSubject.started_at.desc())
+    )
+
+    if learner_subject is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active learning subject found.",
+        )
+
+    target_mastery = float(
+        learner_subject.target_mastery
+    )
+
+    # --------------------------------------------------------
+    # 2. Load all active concepts
+    # --------------------------------------------------------
+
+    concepts = list(
+        db.scalars(
+            select(Concept).where(
+                Concept.subject_id == learner_subject.subject_id,
+                Concept.is_active.is_(True),
+            )
+        ).all()
+    )
+
+    if not concepts:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No concepts found for this subject.",
+        )
+
+    concept_map = {
+        concept.id: concept
+        for concept in concepts
+    }
+
+    concept_ids = set(concept_map.keys())
+
+    # --------------------------------------------------------
+    # 3. Load learner mastery
+    # --------------------------------------------------------
+
+    mastery_records = list(
+        db.scalars(
+            select(LearnerConceptMastery).where(
+                LearnerConceptMastery.user_id == current_user.id,
+                LearnerConceptMastery.subject_id
+                == learner_subject.subject_id,
+                LearnerConceptMastery.concept_id.in_(
+                    concept_ids
+                ),
+            )
+        ).all()
+    )
+
+    mastery_map = {
+        mastery.concept_id: mastery
+        for mastery in mastery_records
+    }
+
+    def mastery_score(concept_id: UUID) -> float:
+        mastery = mastery_map.get(concept_id)
+
+        if mastery is None:
+            return 0.0
+
+        return float(mastery.mastery_score)
+
+    def mastery_state(concept_id: UUID) -> str:
+        mastery = mastery_map.get(concept_id)
+
+        if mastery is None:
+            return "unknown"
+
+        return mastery.mastery_state
+
+    # --------------------------------------------------------
+    # 4. Identify concepts that actually need learning
+    #
+    # Mastered concepts are skipped.
+    # --------------------------------------------------------
+
+    required_concepts = set()
+
+    for concept in concepts:
+
+        score = mastery_score(concept.id)
+
+        if score < target_mastery:
+            required_concepts.add(concept.id)
+
+    if not required_concepts:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "You have already reached the target mastery "
+                "for all concepts."
+            ),
+        )
+
+    # --------------------------------------------------------
+    # 5. Load prerequisites
+    # --------------------------------------------------------
+
+    prerequisites = list(
+        db.scalars(
+            select(ConceptPrerequisite).where(
+                ConceptPrerequisite.concept_id.in_(
+                    required_concepts
+                )
+            )
+        ).all()
+    )
+
+    prerequisite_map: dict[UUID, list[UUID]] = {}
+
+    for prerequisite in prerequisites:
+
+        if (
+            prerequisite.prerequisite_concept_id
+            not in concept_ids
+        ):
+            continue
+
+        prerequisite_map.setdefault(
+            prerequisite.concept_id,
+            [],
+        ).append(
+            prerequisite.prerequisite_concept_id
+        )
+
+    # --------------------------------------------------------
+    # 6. Include weak prerequisites automatically
+    #
+    # If concept B needs concept A and A is weak,
+    # A must appear before B.
+    # --------------------------------------------------------
+
+    changed = True
+
+    while changed:
+
+        changed = False
+
+        for concept_id in list(required_concepts):
+
+            for prerequisite_id in prerequisite_map.get(
+                concept_id,
+                [],
+            ):
+
+                if (
+                    mastery_score(prerequisite_id)
+                    < target_mastery
+                    and prerequisite_id
+                    not in required_concepts
+                ):
+                    required_concepts.add(
+                        prerequisite_id
+                    )
+                    changed = True
+
+    # --------------------------------------------------------
+    # 7. Topological ordering
+    #
+    # Prerequisites always appear before dependent concepts.
+    # --------------------------------------------------------
+
+    ordered_ids: list[UUID] = []
+    remaining = set(required_concepts)
+
+    while remaining:
+
+        ready = []
+
+        for concept_id in remaining:
+
+            dependencies = [
+                prerequisite_id
+                for prerequisite_id in prerequisite_map.get(
+                    concept_id,
+                    [],
+                )
+                if prerequisite_id in remaining
+            ]
+
+            if not dependencies:
+                ready.append(concept_id)
+
+        # Safety against circular prerequisite data.
+        if not ready:
+            ready = sorted(
+                remaining,
+                key=lambda cid: (
+                    mastery_score(cid),
+                    concept_map[cid].name.lower(),
+                ),
+            )[:1]
+
+        # Weakest first among concepts currently available.
+        ready.sort(
+            key=lambda cid: (
+                mastery_score(cid),
+                concept_map[cid].name.lower(),
+            )
+        )
+
+        for concept_id in ready:
+            ordered_ids.append(concept_id)
+            remaining.remove(concept_id)
+
+    # --------------------------------------------------------
+    # 8. Supersede an existing active path
+    # --------------------------------------------------------
+
+    existing_path = db.scalar(
+        select(LearningPath).where(
+            LearningPath.learner_subject_id
+            == learner_subject.id,
+            LearningPath.status == "active",
+        )
+    )
+
+    if existing_path is not None:
+        existing_path.status = "superseded"
+
+    # --------------------------------------------------------
+    # 9. Create new learning path
+    # --------------------------------------------------------
+
+    now = datetime.now(timezone.utc)
+
+    learning_path = LearningPath(
+        learner_subject_id=learner_subject.id,
+        status="active",
+        estimated_minutes=0,
+        progress_percent=0,
+        generated_at=now,
+    )
+
+    db.add(learning_path)
+    db.flush()
+
+    # --------------------------------------------------------
+    # 10. Create learning path steps
+    # --------------------------------------------------------
+
+    step_responses = []
+    total_minutes = 0
+
+    for sequence_number, concept_id in enumerate(
+        ordered_ids,
+        start=1,
+    ):
+
+        concept = concept_map[concept_id]
+
+        score = mastery_score(concept_id)
+        state = mastery_state(concept_id)
+
+        # ----------------------------------------------------
+        # Estimate time based on mastery.
+        #
+        # This is intentionally simple for MVP.
+        # Later AI/content metadata can improve it.
+        # ----------------------------------------------------
+
+        if score < 40:
+            estimated_minutes = 30
+        elif score < 70:
+            estimated_minutes = 20
+        else:
+            estimated_minutes = 10
+
+        total_minutes += estimated_minutes
+
+        # ----------------------------------------------------
+        # Determine prerequisite status
+        # ----------------------------------------------------
+
+        concept_prerequisites = prerequisite_map.get(
+            concept_id,
+            [],
+        )
+
+        if not concept_prerequisites:
+
+            prerequisite_status = "satisfied"
+            step_status = (
+                "ready"
+                if sequence_number == 1
+                else "locked"
+            )
+
+        else:
+
+            unsatisfied = [
+                prerequisite_id
+                for prerequisite_id in concept_prerequisites
+                if mastery_score(prerequisite_id)
+                < target_mastery
+            ]
+
+            if not unsatisfied:
+
+                prerequisite_status = "satisfied"
+
+                step_status = (
+                    "ready"
+                    if sequence_number == 1
+                    else "locked"
+                )
+
+            else:
+
+                prerequisite_status = "scheduled_before"
+                step_status = "locked"
+
+        step = LearningPathStep(
+            learning_path_id=learning_path.id,
+            concept_id=concept.id,
+            sequence_number=sequence_number,
+            status=step_status,
+            mastery_threshold=target_mastery,
+            estimated_minutes=estimated_minutes,
+            prerequisite_status=prerequisite_status,
+        )
+
+        db.add(step)
+
+        step_responses.append(
+            (
+                step,
+                concept,
+                score,
+                state,
+            )
+        )
+
+    learning_path.estimated_minutes = total_minutes
+
+    db.commit()
+
+    db.refresh(learning_path)
+
+    # --------------------------------------------------------
+    # 11. Build response
+    # --------------------------------------------------------
+
+    response_steps = []
+
+    for (
+        step,
+        concept,
+        score,
+        state,
+    ) in step_responses:
+
+        response_steps.append(
+            LearningPathStepResponse(
+                id=step.id,
+                concept_id=concept.id,
+                concept_name=concept.name,
+                sequence_number=step.sequence_number,
+                status=step.status,
+                mastery_threshold=float(
+                    step.mastery_threshold
+                ),
+                estimated_minutes=step.estimated_minutes,
+                prerequisite_status=(
+                    step.prerequisite_status
+                ),
+                current_mastery=score,
+                mastery_state=state,
+            )
+        )
+
+    return LearningPathResponse(
+        id=learning_path.id,
+        learner_subject_id=learning_path.learner_subject_id,
+        status=learning_path.status,
+        estimated_minutes=learning_path.estimated_minutes,
+        progress_percent=float(
+            learning_path.progress_percent
+        ),
+        generated_at=learning_path.generated_at,
+        steps=response_steps,
+    )
+# ============================================================
+# GET CURRENT LEARNING PATH
+# ============================================================
+
+@router.get(
+    "/path",
+    response_model=LearningPathResponse,
+)
+def get_learning_path(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> LearningPathResponse:
+
+    learning_path = db.scalar(
+        select(LearningPath)
+        .join(
+            LearnerSubject,
+            LearnerSubject.id
+            == LearningPath.learner_subject_id,
+        )
+        .where(
+            LearnerSubject.user_id == current_user.id,
+            LearnerSubject.status == "active",
+            LearningPath.status == "active",
+        )
+        .order_by(
+            LearningPath.generated_at.desc()
+        )
+    )
+
+    if learning_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active learning path found.",
+        )
+
+    steps = list(
+        db.scalars(
+            select(LearningPathStep)
+            .where(
+                LearningPathStep.learning_path_id
+                == learning_path.id,
+            )
+            .order_by(
+                LearningPathStep.sequence_number
+            )
+        ).all()
+    )
+
+    response_steps = []
+
+    for step in steps:
+
+        mastery = db.scalar(
+            select(LearnerConceptMastery).where(
+                LearnerConceptMastery.user_id
+                == current_user.id,
+                LearnerConceptMastery.concept_id
+                == step.concept_id,
+            )
+        )
+
+        current_mastery = (
+            float(mastery.mastery_score)
+            if mastery is not None
+            else 0.0
+        )
+
+        current_state = (
+            mastery.mastery_state
+            if mastery is not None
+            else "unknown"
+        )
+
+        response_steps.append(
+            LearningPathStepResponse(
+                id=step.id,
+                concept_id=step.concept_id,
+                concept_name=step.concept.name,
+                sequence_number=step.sequence_number,
+                status=step.status,
+                mastery_threshold=float(
+                    step.mastery_threshold
+                ),
+                estimated_minutes=step.estimated_minutes,
+                prerequisite_status=(
+                    step.prerequisite_status
+                ),
+                current_mastery=current_mastery,
+                mastery_state=current_state,
+            )
+        )
+
+    return LearningPathResponse(
+        id=learning_path.id,
+        learner_subject_id=learning_path.learner_subject_id,
+        status=learning_path.status,
+        estimated_minutes=learning_path.estimated_minutes,
+        progress_percent=float(
+            learning_path.progress_percent
+        ),
+        generated_at=learning_path.generated_at,
+        steps=response_steps,
+    )
+
+# ============================================================
+# AI RESOURCE RECOMMENDATIONS
+# ============================================================
+
+@router.get(
+    "/resources/recommendations",
+    response_model=list[
+        ResourceRecommendationResponse
+    ],
+)
+def recommend_resources(
+    concept_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # --------------------------------------------------------
+    # 1. Load concept
+    # --------------------------------------------------------
+
+    concept = db.scalar(
+        select(Concept).where(
+            Concept.id == concept_id,
+            Concept.is_active.is_(True),
+        )
+    )
+
+    if concept is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Concept not found.",
+        )
+
+    # --------------------------------------------------------
+    # 2. Load learner mastery
+    # --------------------------------------------------------
+
+    mastery = db.scalar(
+        select(LearnerConceptMastery).where(
+            LearnerConceptMastery.user_id
+            == current_user.id,
+            LearnerConceptMastery.concept_id
+            == concept.id,
+        )
+    )
+
+    mastery_score = (
+        float(mastery.mastery_score)
+        if mastery is not None
+        else 0.0
+    )
+
+    # --------------------------------------------------------
+    # 3. Search YouTube
+    # --------------------------------------------------------
+
+    from app.services.youtube_service import (
+        YouTubeService,
+    )
+
+    from app.services.resource_intelligence import (
+        ResourceIntelligenceService,
+    )
+
+    youtube = YouTubeService()
+
+    ai_service = (
+        ResourceIntelligenceService()
+    )
+
+    query = (
+        f"{concept.name} "
+        f"Python tutorial explained"
+    )
+
+    videos = youtube.search_videos(
+        query,
+        max_results=5,
+    )
+
+    recommendations = []
+
+    # --------------------------------------------------------
+    # 4. Process candidates
+    # --------------------------------------------------------
+
+    for video in videos:
+
+        try:
+
+            transcript = (
+                ai_service.get_transcript(
+                    video["video_id"]
+                )
+            )
+
+        except Exception:
+            # Transcript unavailable.
+            # Skip this candidate rather than
+            # inventing timestamps.
+            continue
+
+        if not transcript:
+            continue
+
+        transcript = (
+            ai_service.combine_transcript_chunks(
+                transcript
+            )
+        )
+
+        sections = (
+            ai_service.map_concept_to_transcript(
+                concept_name=concept.name,
+                concept_description=(
+                    concept.description or ""
+                ),
+                transcript=transcript,
+                mastery_score=mastery_score,
+            )
+        )
+
+        if not sections:
+            continue
+
+        recommendations.append(
+            ResourceRecommendationResponse(
+                video_id=video["video_id"],
+                title=video["title"],
+                description=video[
+                    "description"
+                ],
+                channel_title=video[
+                    "channel_title"
+                ],
+                url=video["url"],
+                thumbnail_url=video[
+                    "thumbnail_url"
+                ],
+                sections=[
+                    ResourceSectionResponse(
+                        start_seconds=(
+                            section.start_seconds
+                        ),
+                        end_seconds=(
+                            section.end_seconds
+                        ),
+                        concept=section.concept,
+                        reason=section.reason,
+                        confidence=section.confidence,
+                    )
+                    for section in sections
+                ],
+            )
+        )
+
+        # MVP: return at most 3 strong resources.
+        if len(recommendations) >= 3:
+            break
+
+    return recommendations
