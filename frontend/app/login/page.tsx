@@ -10,12 +10,74 @@ import {
   EyeOff,
   LockKeyhole,
   Mail,
-
 } from "lucide-react";
-import { useState } from "react";
+import { FormEvent, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { getCurrentUser, login } from "@/lib/api/auth";
 
 export default function LoginPage() {
+  const searchParams = useSearchParams();
+  const registered = searchParams.get("registered") === "true";
+
   const [showPassword, setShowPassword] = useState(false);
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleLogin = async (
+    event: FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault();
+
+    setError("");
+
+    if (!email.trim() || !password) {
+      setError("Please enter your email and password.");
+      return;
+    }
+
+    try {
+      setLoading(true);
+
+      // 1. Login through FastAPI
+      const tokenResponse = await login({
+        email: email.trim(),
+        password,
+      });
+
+      // 2. Store authentication token
+      localStorage.setItem(
+        "access_token",
+        tokenResponse.access_token,
+      );
+
+      // 3. Verify token and retrieve current user
+      const user = await getCurrentUser(
+        tokenResponse.access_token,
+      );
+
+      // 4. Store current user
+      localStorage.setItem(
+        "current_user",
+        JSON.stringify(user),
+      );
+
+      // 5. Go to dashboard
+      window.location.href = "/dashboard";
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Unable to log in. Please try again.";
+
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <main className="min-h-screen bg-[#eef4fb] p-3 sm:p-5 lg:p-7">
@@ -24,14 +86,15 @@ export default function LoginPage() {
         {/* =====================================================
             LEFT VISUAL
         ===================================================== */}
+
         <section className="relative hidden overflow-hidden bg-[#eaf2ff] lg:block">
 
-          {/* Background glow */}
           <div className="absolute -left-20 top-20 h-[420px] w-[420px] rounded-full bg-[#c9dcff] opacity-60 blur-[90px]" />
 
           <div className="absolute -bottom-20 right-[-80px] h-[400px] w-[400px] rounded-full bg-[#d7e6ff] opacity-70 blur-[90px]" />
 
           {/* Logo */}
+
           <motion.div
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -48,10 +111,14 @@ export default function LoginPage() {
           </motion.div>
 
           {/* Main message */}
+
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2, duration: 0.7 }}
+            transition={{
+              delay: 0.2,
+              duration: 0.7,
+            }}
             className="absolute left-10 top-[34%] z-10 max-w-[430px]"
           >
             <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.18em] text-[#3970e8]">
@@ -61,15 +128,19 @@ export default function LoginPage() {
             <h1 className="text-[44px] font-bold leading-[1.02] tracking-[-0.055em] text-[#132038]">
               Learn what
               <br />
-              <span className="text-[#3265e8]">actually matters.</span>
+              <span className="text-[#3265e8]">
+                actually matters.
+              </span>
             </h1>
 
             <p className="mt-5 max-w-[330px] text-[13px] leading-6 text-[#66758a]">
-              Your journey starts with understanding what you already know.
+              Your journey starts with understanding what you
+              already know.
             </p>
           </motion.div>
 
           {/* Animated knowledge path */}
+
           <svg
             viewBox="0 0 600 400"
             className="absolute bottom-[-10px] left-[-30px] h-[55%] w-[115%]"
@@ -85,8 +156,14 @@ export default function LoginPage() {
                 gradientUnits="userSpaceOnUse"
               >
                 <stop stopColor="#c5dbff" />
-                <stop offset="0.5" stopColor="#7da7f5" />
-                <stop offset="1" stopColor="#b7d0ff" />
+                <stop
+                  offset="0.5"
+                  stopColor="#7da7f5"
+                />
+                <stop
+                  offset="1"
+                  stopColor="#b7d0ff"
+                />
               </linearGradient>
 
               <filter
@@ -109,7 +186,9 @@ export default function LoginPage() {
               filter="url(#loginGlow)"
               initial={{ pathLength: 0 }}
               animate={{ pathLength: 1 }}
-              transition={{ duration: 2.2 }}
+              transition={{
+                duration: 2.2,
+              }}
             />
 
             <motion.path
@@ -119,10 +198,15 @@ export default function LoginPage() {
               strokeLinecap="round"
               initial={{ pathLength: 0 }}
               animate={{ pathLength: 1 }}
-              transition={{ duration: 2.2 }}
+              transition={{
+                duration: 2.2,
+              }}
             />
 
-            <circle r="5" fill="#4c7fea">
+            <circle
+              r="5"
+              fill="#4c7fea"
+            >
               <animateMotion
                 dur="7s"
                 repeatCount="indefinite"
@@ -134,6 +218,7 @@ export default function LoginPage() {
           </svg>
 
           {/* Floating insight */}
+
           <motion.div
             animate={{
               y: [0, -6, 0],
@@ -164,11 +249,18 @@ export default function LoginPage() {
         {/* =====================================================
             RIGHT LOGIN
         ===================================================== */}
+
         <section className="flex items-center justify-center px-6 py-12 sm:px-12 lg:px-16">
 
           <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
+            initial={{
+              opacity: 0,
+              y: 20,
+            }}
+            animate={{
+              opacity: 1,
+              y: 0,
+            }}
             transition={{
               duration: 0.65,
               ease: [0.22, 1, 0.36, 1],
@@ -177,6 +269,7 @@ export default function LoginPage() {
           >
 
             {/* Mobile logo */}
+
             <div className="mb-10 flex items-center gap-2.5 lg:hidden">
               <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#edf3ff] text-[#3265e8]">
                 <Brain size={18} />
@@ -188,6 +281,7 @@ export default function LoginPage() {
             </div>
 
             {/* Heading */}
+
             <div>
               <h2 className="text-[32px] font-bold tracking-[-0.045em] text-[#172033]">
                 Welcome back!
@@ -198,10 +292,53 @@ export default function LoginPage() {
               </p>
             </div>
 
-            {/* Form */}
-            <form className="mt-9 space-y-5">
+            {/* =================================================
+                REGISTRATION SUCCESS MESSAGE
+            ================================================= */}
+
+            {registered && (
+              <motion.div
+                initial={{
+                  opacity: 0,
+                  y: -8,
+                }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                }}
+                transition={{
+                  duration: 0.4,
+                }}
+                className="mt-5 flex items-start gap-3 rounded-xl border border-[#cfe8dc] bg-[#f1faf6] px-4 py-3"
+              >
+                <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#dff3e9] text-[#4ba887]">
+                  <Check size={12} />
+                </div>
+
+                <div>
+                  <p className="text-[10px] font-bold text-[#3f725d]">
+                    Account created successfully.
+                  </p>
+
+                  <p className="mt-1 text-[9px] leading-4 text-[#719080]">
+                    Welcome to LearnFlow. Log in to start
+                    building your learning path.
+                  </p>
+                </div>
+              </motion.div>
+            )}
+
+            {/* =================================================
+                LOGIN FORM
+            ================================================= */}
+
+            <form
+              onSubmit={handleLogin}
+              className="mt-9 space-y-5"
+            >
 
               {/* Email */}
+
               <div>
                 <label
                   htmlFor="email"
@@ -219,13 +356,20 @@ export default function LoginPage() {
                   <input
                     id="email"
                     type="email"
+                    value={email}
+                    onChange={(event) =>
+                      setEmail(event.target.value)
+                    }
                     placeholder="you@example.com"
-                    className="h-11 w-full rounded-xl border border-[#e0e6ef] bg-[#fbfcfe] pl-10 pr-4 text-[12px] outline-none transition placeholder:text-[#b0b7c2] focus:border-[#6f98ed] focus:bg-white focus:ring-4 focus:ring-[#e9f0ff]"
+                    autoComplete="email"
+                    disabled={loading}
+                    className="h-11 w-full rounded-xl border border-[#e0e6ef] bg-[#fbfcfe] pl-10 pr-4 text-[12px] outline-none transition placeholder:text-[#b0b7c2] focus:border-[#6f98ed] focus:bg-white focus:ring-4 focus:ring-[#e9f0ff] disabled:opacity-60"
                   />
                 </div>
               </div>
 
               {/* Password */}
+
               <div>
                 <div className="mb-2 flex items-center justify-between">
                   <label
@@ -237,7 +381,8 @@ export default function LoginPage() {
 
                   <button
                     type="button"
-                    className="text-[9px] font-medium text-[#3970e8] hover:underline"
+                    disabled={loading}
+                    className="text-[9px] font-medium text-[#3970e8] hover:underline disabled:opacity-50"
                   >
                     Forgot password?
                   </button>
@@ -251,15 +396,35 @@ export default function LoginPage() {
 
                   <input
                     id="password"
-                    type={showPassword ? "text" : "password"}
+                    type={
+                      showPassword
+                        ? "text"
+                        : "password"
+                    }
+                    value={password}
+                    onChange={(event) =>
+                      setPassword(event.target.value)
+                    }
                     placeholder="••••••••"
-                    className="h-11 w-full rounded-xl border border-[#e0e6ef] bg-[#fbfcfe] pl-10 pr-11 text-[12px] outline-none transition placeholder:text-[#b0b7c2] focus:border-[#6f98ed] focus:bg-white focus:ring-4 focus:ring-[#e9f0ff]"
+                    autoComplete="current-password"
+                    disabled={loading}
+                    className="h-11 w-full rounded-xl border border-[#e0e6ef] bg-[#fbfcfe] pl-10 pr-11 text-[12px] outline-none transition placeholder:text-[#b0b7c2] focus:border-[#6f98ed] focus:bg-white focus:ring-4 focus:ring-[#e9f0ff] disabled:opacity-60"
                   />
 
                   <button
                     type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[#9ca5b3] transition hover:text-[#3970e8]"
+                    disabled={loading}
+                    onClick={() =>
+                      setShowPassword(
+                        !showPassword,
+                      )
+                    }
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[#9ca5b3] transition hover:text-[#3970e8] disabled:opacity-50"
+                    aria-label={
+                      showPassword
+                        ? "Hide password"
+                        : "Show password"
+                    }
                   >
                     {showPassword ? (
                       <EyeOff size={15} />
@@ -270,31 +435,68 @@ export default function LoginPage() {
                 </div>
               </div>
 
+              {/* Error */}
+
+              {error && (
+                <motion.div
+                  initial={{
+                    opacity: 0,
+                    y: -5,
+                  }}
+                  animate={{
+                    opacity: 1,
+                    y: 0,
+                  }}
+                  className="rounded-xl border border-[#f0caca] bg-[#fff4f4] px-3 py-2.5 text-[9px] leading-4 text-[#b34b4b]"
+                >
+                  {error}
+                </motion.div>
+              )}
+
               {/* Login */}
+
               <button
                 type="submit"
-                className="group flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#121c2c] text-[11px] font-semibold text-white shadow-[0_8px_20px_rgba(18,28,44,0.15)] transition duration-300 hover:-translate-y-0.5 hover:shadow-[0_12px_25px_rgba(18,28,44,0.2)]"
+                disabled={loading}
+                className="group flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#121c2c] text-[11px] font-semibold text-white shadow-[0_8px_20px_rgba(18,28,44,0.15)] transition duration-300 hover:-translate-y-0.5 hover:shadow-[0_12px_25px_rgba(18,28,44,0.2)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
               >
-                Log in
+                {loading ? (
+                  <>
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                    Logging in...
+                  </>
+                ) : (
+                  <>
+                    Log in
 
-                <ArrowRight
-                  size={13}
-                  className="transition-transform group-hover:translate-x-1"
-                />
+                    <ArrowRight
+                      size={13}
+                      className="transition-transform group-hover:translate-x-1"
+                    />
+                  </>
+                )}
               </button>
             </form>
 
             {/* Divider */}
+
             <div className="my-6 flex items-center gap-3">
               <div className="h-px flex-1 bg-[#e8ecf2]" />
+
               <span className="text-[9px] text-[#a1a8b4]">
                 or
               </span>
+
               <div className="h-px flex-1 bg-[#e8ecf2]" />
             </div>
 
             {/* Google */}
-            <button className="flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-[#e0e6ef] bg-white text-[11px] font-semibold text-[#3f4958] transition duration-300 hover:-translate-y-0.5 hover:bg-[#f9fbff] hover:shadow-sm">
+
+            <button
+              type="button"
+              disabled
+              className="flex h-11 w-full cursor-not-allowed items-center justify-center gap-2 rounded-xl border border-[#e0e6ef] bg-white text-[11px] font-semibold text-[#3f4958] opacity-60"
+            >
               <span className="text-[14px] font-bold text-[#4285f4]">
                 G
               </span>
@@ -303,6 +505,7 @@ export default function LoginPage() {
             </button>
 
             {/* Sign up */}
+
             <p className="mt-8 text-center text-[10px] text-[#8993a1]">
               Don&apos;t have an account?{" "}
               <Link
@@ -313,9 +516,13 @@ export default function LoginPage() {
               </Link>
             </p>
 
-            {/* Small trust line */}
+            {/* Trust */}
+
             <div className="mt-8 flex items-center justify-center gap-2 text-[9px] text-[#a0a8b5]">
-              <Check size={11} className="text-[#4ba887]" />
+              <Check
+                size={11}
+                className="text-[#4ba887]"
+              />
               Your learning data stays private.
             </div>
           </motion.div>
