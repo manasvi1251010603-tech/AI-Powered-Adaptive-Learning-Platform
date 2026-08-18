@@ -4,29 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from app.db.models.personalization import (
-    LearningPath,
-    LearningPathStep,
-)
-from app.db.models.content import (
-    Resource,
-    ResourceConcept,
-)
-from app.db.models.video import (
-    Video,
-    VideoSegment,
-    VideoSegmentConcept,
-)
 
-
-
-from app.db.models.personalization import (
-    LearningPath,
-    LearningPathStep,
-    Recommendation,
-)
-from app.db.models.personalization import Recommendation
-from app.db.models.knowledge import LearnerConceptMastery
 from app.api.auth.dependencies import get_current_user
 from app.api.learning.schemas import (
     DiagnosticAnalysisResponse,
@@ -54,10 +32,22 @@ from app.db.models.assessment import (
     AssessmentResponse,
     Question,
 )
-from app.db.models.identity import LearnerProfile, User
+from app.db.models.content import (
+    Resource,
+    ResourceConcept,
+)
+from app.db.models.identity import (
+    LearnerProfile,
+    User,
+)
 from app.db.models.knowledge import (
     LearnerConceptMastery,
     MasteryHistory,
+)
+from app.db.models.personalization import (
+    LearningPath,
+    LearningPathStep,
+    Recommendation,
 )
 from app.db.models.taxonomy import (
     Concept,
@@ -65,7 +55,11 @@ from app.db.models.taxonomy import (
     LearnerSubject,
     LearningGoal,
     Subject,
-
+)
+from app.db.models.video import (
+    Video,
+    VideoSegment,
+    VideoSegmentConcept,
 )
 from app.db.session import get_db
 
@@ -353,7 +347,6 @@ def start_diagnostic(
         ).all()
     )
 
-    # First diagnostic contains at most 10 questions.
     questions = questions[:10]
 
     if not questions:
@@ -372,7 +365,10 @@ def start_diagnostic(
         learner_subject_id=learner_subject.id,
         assessment_type="diagnostic",
         status="in_progress",
-        target_concepts=[str(concept_id) for concept_id in concept_ids],
+        target_concepts=[
+            str(concept_id)
+            for concept_id in concept_ids
+        ],
         started_at=now,
     )
 
@@ -480,7 +476,7 @@ def submit_diagnostic_answer(
 ) -> DiagnosticAnswerResponse:
 
     # --------------------------------------------------------
-    # 1. Verify assessment belongs to the current learner
+    # 1. Verify assessment belongs to current learner
     # --------------------------------------------------------
 
     assessment = db.scalar(
@@ -508,7 +504,7 @@ def submit_diagnostic_answer(
         )
 
     # --------------------------------------------------------
-    # 2. Verify attempt belongs to this assessment + learner
+    # 2. Verify attempt
     # --------------------------------------------------------
 
     attempt = db.scalar(
@@ -532,7 +528,7 @@ def submit_diagnostic_answer(
         )
 
     # --------------------------------------------------------
-    # 3. Find the assessment item
+    # 3. Find assessment item
     # --------------------------------------------------------
 
     item = db.scalar(
@@ -904,6 +900,8 @@ def get_diagnostic_analysis(
         },
         concepts=concepts,
     )
+
+
 # ============================================================
 # PERSONALIZED LEARNING PATH
 # ============================================================
@@ -923,7 +921,8 @@ def generate_learning_path(
     # --------------------------------------------------------
 
     learner_subject = db.scalar(
-        select(LearnerSubject).where(
+        select(LearnerSubject)
+        .where(
             LearnerSubject.user_id == current_user.id,
             LearnerSubject.status == "active",
         )
@@ -1005,9 +1004,7 @@ def generate_learning_path(
         return mastery.mastery_state
 
     # --------------------------------------------------------
-    # 4. Identify concepts that actually need learning
-    #
-    # Mastered concepts are skipped.
+    # 4. Identify concepts that need learning
     # --------------------------------------------------------
 
     required_concepts = set()
@@ -1061,9 +1058,6 @@ def generate_learning_path(
 
     # --------------------------------------------------------
     # 6. Include weak prerequisites automatically
-    #
-    # If concept B needs concept A and A is weak,
-    # A must appear before B.
     # --------------------------------------------------------
 
     changed = True
@@ -1092,8 +1086,6 @@ def generate_learning_path(
 
     # --------------------------------------------------------
     # 7. Topological ordering
-    #
-    # Prerequisites always appear before dependent concepts.
     # --------------------------------------------------------
 
     ordered_ids: list[UUID] = []
@@ -1127,7 +1119,7 @@ def generate_learning_path(
                 ),
             )[:1]
 
-        # Weakest first among concepts currently available.
+        # Weakest first among currently available concepts.
         ready.sort(
             key=lambda cid: (
                 mastery_score(cid),
@@ -1187,13 +1179,6 @@ def generate_learning_path(
 
         score = mastery_score(concept_id)
         state = mastery_state(concept_id)
-
-        # ----------------------------------------------------
-        # Estimate time based on mastery.
-        #
-        # This is intentionally simple for MVP.
-        # Later AI/content metadata can improve it.
-        # ----------------------------------------------------
 
         if score < 40:
             estimated_minutes = 30
@@ -1316,6 +1301,8 @@ def generate_learning_path(
         generated_at=learning_path.generated_at,
         steps=response_steps,
     )
+
+
 # ============================================================
 # GET CURRENT LEARNING PATH
 # ============================================================
@@ -1420,6 +1407,7 @@ def get_learning_path(
         generated_at=learning_path.generated_at,
         steps=response_steps,
     )
+
 
 # ============================================================
 # AI RESOURCE RECOMMENDATIONS
@@ -1607,7 +1595,7 @@ def recommend_resources(
             )
 
         # ----------------------------------------------------
-        # 7. Create / update Video
+        # 7. Create Video
         # ----------------------------------------------------
 
         video = db.scalar(
@@ -1634,8 +1622,6 @@ def recommend_resources(
         # ----------------------------------------------------
         # 8. Store AI-selected timestamp sections
         # ----------------------------------------------------
-
-        stored_sections = []
 
         for index, section in enumerate(
             sections,
@@ -1671,10 +1657,6 @@ def recommend_resources(
                     ),
                     is_primary=True,
                 )
-            )
-
-            stored_sections.append(
-                video_segment
             )
 
         # ----------------------------------------------------
@@ -1738,152 +1720,5 @@ def recommend_resources(
             break
 
     db.commit()
-
-    return recommendations
-def recommend_resources(
-    concept_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    # --------------------------------------------------------
-    # 1. Load concept
-    # --------------------------------------------------------
-
-    concept = db.scalar(
-        select(Concept).where(
-            Concept.id == concept_id,
-            Concept.is_active.is_(True),
-        )
-    )
-
-    if concept is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Concept not found.",
-        )
-
-    # --------------------------------------------------------
-    # 2. Load learner mastery
-    # --------------------------------------------------------
-
-    mastery = db.scalar(
-        select(LearnerConceptMastery).where(
-            LearnerConceptMastery.user_id
-            == current_user.id,
-            LearnerConceptMastery.concept_id
-            == concept.id,
-        )
-    )
-
-    mastery_score = (
-        float(mastery.mastery_score)
-        if mastery is not None
-        else 0.0
-    )
-
-    # --------------------------------------------------------
-    # 3. Search YouTube
-    # --------------------------------------------------------
-
-    from app.services.youtube_service import (
-        YouTubeService,
-    )
-
-    from app.services.resource_intelligence import (
-        ResourceIntelligenceService,
-    )
-
-    youtube = YouTubeService()
-
-    ai_service = (
-        ResourceIntelligenceService()
-    )
-
-    query = f"{concept.name} tutorial explained"
-
-    videos = youtube.search_videos(
-        query,
-        max_results=5,
-    )
-
-    recommendations = []
-
-    # --------------------------------------------------------
-    # 4. Process candidates
-    # --------------------------------------------------------
-
-    for video in videos:
-
-        try:
-
-            transcript = (
-                ai_service.get_transcript(
-                    video["video_id"]
-                )
-            )
-
-        except Exception:
-            # Transcript unavailable.
-            # Skip this candidate rather than
-            # inventing timestamps.
-            continue
-
-        if not transcript:
-            continue
-
-        transcript = (
-            ai_service.combine_transcript_chunks(
-                transcript
-            )
-        )
-
-        sections = (
-            ai_service.map_concept_to_transcript(
-                concept_name=concept.name,
-                concept_description=(
-                    concept.description or ""
-                ),
-                transcript=transcript,
-                mastery_score=mastery_score,
-            )
-        )
-
-        if not sections:
-            continue
-
-        recommendations.append(
-            ResourceRecommendationResponse(
-                video_id=video["video_id"],
-                title=video["title"],
-                description=video[
-                    "description"
-                ],
-                channel_title=video[
-                    "channel_title"
-                ],
-                url=video["url"],
-                thumbnail_url=video[
-                    "thumbnail_url"
-                ],
-                sections=[
-                    ResourceSectionResponse(
-                        start_seconds=(
-                            section.start_seconds
-                        ),
-                        end_seconds=(
-                            section.end_seconds
-                        ),
-                        concept=section.concept,
-                        reason=section.reason,
-                        confidence=section.confidence,
-                    )
-                    for section in sections
-                ],
-            )
-        )
-
-        # MVP: return at most 3 strong resources.
-        if len(recommendations) >= 3:
-            break
 
     return recommendations
