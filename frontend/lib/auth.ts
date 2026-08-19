@@ -1,5 +1,5 @@
 import { getCurrentUser } from "@/lib/api/auth";
-
+import { register } from "@/lib/api/auth";
 const TOKEN_KEY = "access_token";
 const USER_KEY = "current_user";
 
