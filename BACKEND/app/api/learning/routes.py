@@ -273,42 +273,42 @@ def update_learner_profile(
     status_code=status.HTTP_201_CREATED,
 )
 def start_diagnostic(
+    learner_subject_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> DiagnosticStartResponse:
 
     # --------------------------------------------------------
-    # 1. Find the learner's active Python enrollment
+    # 1. Find the learner's selected active enrollment
     # --------------------------------------------------------
 
     learner_subject = db.scalar(
-        select(LearnerSubject)
-        .join(
-            Subject,
-            Subject.id == LearnerSubject.subject_id,
-        )
-        .where(
+        select(LearnerSubject).where(
+            LearnerSubject.id == learner_subject_id,
             LearnerSubject.user_id == current_user.id,
             LearnerSubject.status == "active",
-            Subject.slug == "python",
         )
     )
 
     if learner_subject is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="You are not actively enrolled in Python.",
+            detail=(
+                "Active learning enrollment not found "
+                "for this learner."
+            ),
         )
 
     # --------------------------------------------------------
-    # 2. Find Python concepts
+    # 2. Find concepts for the selected subject
     # --------------------------------------------------------
 
     concepts = list(
         db.scalars(
             select(Concept)
             .where(
-                Concept.subject_id == learner_subject.subject_id,
+                Concept.subject_id
+                == learner_subject.subject_id,
                 Concept.is_active.is_(True),
             )
             .order_by(Concept.name)
@@ -347,12 +347,16 @@ def start_diagnostic(
         ).all()
     )
 
+    # Keep the diagnostic manageable for the MVP.
     questions = questions[:10]
 
     if not questions:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No diagnostic questions are available.",
+            detail=(
+                "No diagnostic questions are available "
+                "for this subject."
+            ),
         )
 
     now = datetime.now(timezone.utc)
@@ -415,10 +419,10 @@ def start_diagnostic(
     db.refresh(attempt)
 
     # --------------------------------------------------------
-    # 7. Build safe response
+    # 7. Build safe question response
     #
     # IMPORTANT:
-    # We deliberately DO NOT expose the answer key.
+    # Never expose answer_data to the frontend.
     # --------------------------------------------------------
 
     question_responses = []
